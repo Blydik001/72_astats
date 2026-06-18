@@ -11,12 +11,10 @@ from io import StringIO
 # ==================== НАСТРОЙКИ ====================
 VK_TOKEN = "vk1.a.tJGT6GPZybsXLJJSqQOYpyLGYIpL-0EJQPQN3IvOffvyGJ7bTxpkkp5LX1YhJQXpYFeZLJVVvv8cpxYU-HZyHpewUcGzx8-xOWZWs-YAmvecVRau_m4M8EhtH2bw2IPvvMmAEODWz7SJQK98Qi516sOv1h-fgbqtOqz-Sv_e63eMQNW_7OaMExGQZZgkHOBU9xWSt-Umv6Cewhq-UJFCQQ"
 
-# Публичная ссылка на таблицу
 TABLE_URL = "https://docs.google.com/spreadsheets/d/ТВОЙ_ID/edit?usp=sharing"
 SHEET_NAME = "Лист1"
 
-# ID беседы для заявок (узнать через /chatid в беседе)
-CHAT_ID = 1
+CHAT_ID = 1  # ID беседы
 # ===================================================
 
 def extract_id(url):
@@ -112,30 +110,35 @@ def format_admin_stats(row, headers):
 
 def send_application_to_chat(user_id, nickname):
     """Отправляет заявку в беседу"""
-    response = vk.messages.send(
+    vk.messages.send(
         chat_id=CHAT_ID,
         random_id=get_random_id(),
         message=f"🔔 Новая заявка на подтверждение!\n\n"
                 f"ID пользователя: {user_id}\n"
                 f"Никнейм: {nickname}\n\n"
-                f"Ответьте на это сообщение:\n"
-                f"/подтвердить — одобрить\n"
-                f"/отклонить — отклонить"
+                f"Для подтверждения: /подтвердить {user_id}\n"
+                f"Для отклонения: /отклонить {user_id}"
     )
     
-    if response:
-        pending = load_json(PENDING_FILE)
-        pending[str(response)] = {
-            "user_id": user_id,
-            "nickname": nickname
-        }
-        save_json(pending, PENDING_FILE)
+    # Сохраняем заявку
+    pending = load_json(PENDING_FILE)
+    pending[str(user_id)] = {
+        "nickname": nickname,
+        "status": "ожидает"
+    }
+    save_json(pending, PENDING_FILE)
 
 def approve_application(user_id, nickname):
     """Подтверждает заявку"""
     approved = load_json(USERS_FILE)
     approved[str(user_id)] = nickname
     save_json(approved, USERS_FILE)
+    
+    # Удаляем из ожидающих
+    pending = load_json(PENDING_FILE)
+    if str(user_id) in pending:
+        del pending[str(user_id)]
+        save_json(pending, PENDING_FILE)
     
     vk.messages.send(
         user_id=user_id,
@@ -147,6 +150,12 @@ def approve_application(user_id, nickname):
 
 def reject_application(user_id, nickname):
     """Отклоняет заявку"""
+    # Удаляем из ожидающих
+    pending = load_json(PENDING_FILE)
+    if str(user_id) in pending:
+        del pending[str(user_id)]
+        save_json(pending, PENDING_FILE)
+    
     vk.messages.send(
         user_id=user_id,
         random_id=get_random_id(),
@@ -158,6 +167,11 @@ def get_user_nickname(user_id):
     approved = load_json(USERS_FILE)
     return approved.get(str(user_id))
 
+def get_pending_user(user_id):
+    """Получает данные ожидающей заявки"""
+    pending = load_json(PENDING_FILE)
+    return pending.get(str(user_id))
+
 print("Бот запущен...")
 
 for event in longpoll.listen():
@@ -168,6 +182,7 @@ for event in longpoll.listen():
         
         states = load_json(STATES_FILE)
         
+        # ==================== /id ====================
         if text.lower() == "/id":
             vk.messages.send(
                 user_id=user_id,
@@ -176,6 +191,7 @@ for event in longpoll.listen():
             )
             continue
         
+        # ==================== /chatid ====================
         if text.lower() == "/chatid":
             if chat_id:
                 reply = f"ID этой беседы: {chat_id}"
@@ -188,6 +204,7 @@ for event in longpoll.listen():
             )
             continue
         
+        # ==================== НАЧАТЬ ====================
         if text.lower() == "начать":
             states[str(user_id)] = {"state": "waiting_nickname"}
             save_json(states, STATES_FILE)
@@ -200,6 +217,7 @@ for event in longpoll.listen():
             )
             continue
         
+        # ==================== ОЖИДАНИЕ НИКНЕЙМА ====================
         if str(user_id) in states and states[str(user_id)].get("state") == "waiting_nickname":
             nickname = text
             send_application_to_chat(user_id, nickname)
@@ -214,27 +232,57 @@ for event in longpoll.listen():
             )
             continue
         
-        if hasattr(event, 'reply_message') and event.reply_message:
-            reply_to_msg_id = str(event.reply_message)
-            pending = load_json(PENDING_FILE)
+        # ==================== /подтвердить ID ====================
+        if text.lower().startswith("/подтвердить"):
+            parts = text.split()
+            if len(parts) == 2:
+                try:
+                    target_id = int(parts[1])
+                    application = get_pending_user(target_id)
+                    
+                    if application:
+                        approve_application(target_id, application["nickname"])
+                        reply = f"✅ Заявка {application['nickname']} (ID: {target_id}) подтверждена!"
+                    else:
+                        reply = f"❌ Заявка с ID {target_id} не найдена."
+                except ValueError:
+                    reply = "❌ Неверный ID. Используйте: /подтвердить 123456789"
+            else:
+                reply = "❗ Используйте: /подтвердить ID"
             
-            if reply_to_msg_id in pending and chat_id:
-                application = pending[reply_to_msg_id]
-                target_user_id = application["user_id"]
-                target_nickname = application["nickname"]
-                
-                if text.lower() == "/подтвердить":
-                    approve_application(target_user_id, target_nickname)
-                    reply = f"✅ Заявка {target_nickname} (ID: {target_user_id}) подтверждена!"
-                    vk.messages.send(chat_id=chat_id, random_id=get_random_id(), message=reply)
-                    continue
-                
-                elif text.lower() == "/отклонить":
-                    reject_application(target_user_id, target_nickname)
-                    reply = f"❌ Заявка {target_nickname} (ID: {target_user_id}) отклонена."
-                    vk.messages.send(chat_id=chat_id, random_id=get_random_id(), message=reply)
-                    continue
+            vk.messages.send(
+                user_id=user_id,
+                random_id=get_random_id(),
+                message=reply
+            )
+            continue
         
+        # ==================== /отклонить ID ====================
+        if text.lower().startswith("/отклонить"):
+            parts = text.split()
+            if len(parts) == 2:
+                try:
+                    target_id = int(parts[1])
+                    application = get_pending_user(target_id)
+                    
+                    if application:
+                        reject_application(target_id, application["nickname"])
+                        reply = f"❌ Заявка {application['nickname']} (ID: {target_id}) отклонена."
+                    else:
+                        reply = f"❌ Заявка с ID {target_id} не найдена."
+                except ValueError:
+                    reply = "❌ Неверный ID. Используйте: /отклонить 123456789"
+            else:
+                reply = "❗ Используйте: /отклонить ID"
+            
+            vk.messages.send(
+                user_id=user_id,
+                random_id=get_random_id(),
+                message=reply
+            )
+            continue
+        
+        # ==================== /stats ====================
         if text.lower() == "/stats":
             nickname = get_user_nickname(user_id)
             
