@@ -120,7 +120,6 @@ def send_application_to_chat(user_id, nickname):
                 f"Для отклонения: /отклонить {user_id}"
     )
     
-    # Сохраняем заявку
     pending = load_json(PENDING_FILE)
     pending[str(user_id)] = {
         "nickname": nickname,
@@ -134,7 +133,6 @@ def approve_application(user_id, nickname):
     approved[str(user_id)] = nickname
     save_json(approved, USERS_FILE)
     
-    # Удаляем из ожидающих
     pending = load_json(PENDING_FILE)
     if str(user_id) in pending:
         del pending[str(user_id)]
@@ -150,7 +148,6 @@ def approve_application(user_id, nickname):
 
 def reject_application(user_id, nickname):
     """Отклоняет заявку"""
-    # Удаляем из ожидающих
     pending = load_json(PENDING_FILE)
     if str(user_id) in pending:
         del pending[str(user_id)]
@@ -204,7 +201,7 @@ for event in longpoll.listen():
             )
             continue
         
-        # ==================== НАЧАТЬ ====================
+        # ==================== НАЧАТЬ (только в ЛС) ====================
         if text.lower() == "начать":
             states[str(user_id)] = {"state": "waiting_nickname"}
             save_json(states, STATES_FILE)
@@ -217,7 +214,7 @@ for event in longpoll.listen():
             )
             continue
         
-        # ==================== ОЖИДАНИЕ НИКНЕЙМА ====================
+        # ==================== ОЖИДАНИЕ НИКНЕЙМА (только в ЛС) ====================
         if str(user_id) in states and states[str(user_id)].get("state") == "waiting_nickname":
             nickname = text
             send_application_to_chat(user_id, nickname)
@@ -232,7 +229,7 @@ for event in longpoll.listen():
             )
             continue
         
-        # ==================== /подтвердить ID ====================
+        # ==================== /подтвердить ID (в беседе) ====================
         if text.lower().startswith("/подтвердить"):
             parts = text.split()
             if len(parts) == 2:
@@ -250,14 +247,14 @@ for event in longpoll.listen():
             else:
                 reply = "❗ Используйте: /подтвердить ID"
             
-            vk.messages.send(
-                user_id=user_id,
-                random_id=get_random_id(),
-                message=reply
-            )
+            # Отправляем в беседу или в ЛС (в зависимости от того, где команда)
+            if chat_id:
+                vk.messages.send(chat_id=chat_id, random_id=get_random_id(), message=reply)
+            else:
+                vk.messages.send(user_id=user_id, random_id=get_random_id(), message=reply)
             continue
         
-        # ==================== /отклонить ID ====================
+        # ==================== /отклонить ID (в беседе) ====================
         if text.lower().startswith("/отклонить"):
             parts = text.split()
             if len(parts) == 2:
@@ -275,14 +272,13 @@ for event in longpoll.listen():
             else:
                 reply = "❗ Используйте: /отклонить ID"
             
-            vk.messages.send(
-                user_id=user_id,
-                random_id=get_random_id(),
-                message=reply
-            )
+            if chat_id:
+                vk.messages.send(chat_id=chat_id, random_id=get_random_id(), message=reply)
+            else:
+                vk.messages.send(user_id=user_id, random_id=get_random_id(), message=reply)
             continue
         
-        # ==================== /stats ====================
+        # ==================== /stats (только в ЛС) ====================
         if text.lower() == "/stats":
             nickname = get_user_nickname(user_id)
             
