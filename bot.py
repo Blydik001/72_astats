@@ -10,297 +10,300 @@ from io import StringIO
 
 # ==================== НАСТРОЙКИ ====================
 VK_TOKEN = "vk1.a.tJGT6GPZybsXLJJSqQOYpyLGYIpL-0EJQPQN3IvOffvyGJ7bTxpkkp5LX1YhJQXpYFeZLJVVvv8cpxYU-HZyHpewUcGzx8-xOWZWs-YAmvecVRau_m4M8EhtH2bw2IPvvMmAEODWz7SJQK98Qi516sOv1h-fgbqtOqz-Sv_e63eMQNW_7OaMExGQZZgkHOBU9xWSt-Umv6Cewhq-UJFCQQ"
+TABLE_URL = "https://docs.google.com/spreadsheets/d/1zgg1T2lNCJS4IJuk_AjV3Qvw9WW4Gf3XdLyamscVoOY/edit?usp=drivesdk"
+SHEET_NAME = "Июнь 2026"
+CHAT_ID = 1  # ID беседы для заявок
 
-TABLE_URL = "https://docs.google.com/spreadsheets/d/ТВОЙ_ID/edit?usp=sharing"
-SHEET_NAME = "Лист1"
-
-CHAT_ID = 1  # ID беседы
+# Соответствие букв столбцов индексам (A=0, B=1, C=2, ..., Z=25, AA=26, ...)
+# A=0, B=1, C=2, K=10, L=11, AX=49, AY=50, AZ=51
 # ===================================================
 
-def extract_id(url):
-    match = re.search(r'/d/([a-zA-Z0-9-_]+)', url)
-    return match.group(1) if match else url
+def col_to_index(col_letter):
+    """Переводит букву столбца в индекс: A=0, B=1, ..., Z=25, AA=26, AX=49"""
+    result = 0
+    for char in col_letter.upper():
+        result = result * 26 + (ord(char) - ord('A') + 1)
+    return result - 1
 
-TABLE_ID = extract_id(TABLE_URL)
+# Индексы столбцов
+COL_NICKNAME = col_to_index("A")       # Никнейм
+COL_POSITION = col_to_index("B")       # Должность
+COL_EXTRA_POS = col_to_index("C")      # Доп. должность
+COL_WARNINGS = col_to_index("K")       # Предупреждений
+COL_REPRIMANDS = col_to_index("L")     # Выговоров
+COL_REPUTATION = col_to_index("AX")    # Репутация
+COL_INACTIVES = col_to_index("AY")     # Неактивы
+COL_DAYS = col_to_index("AZ")          # Дни на должности
+
+match = re.search(r'/d/([a-zA-Z0-9-_]+)', TABLE_URL)
+TABLE_ID = match.group(1) if match else TABLE_URL
 
 vk_session = vk_api.VkApi(token=VK_TOKEN)
 vk = vk_session.get_api()
 longpoll = VkLongPoll(vk_session)
 
-STATES_FILE = "user_states.json"
-USERS_FILE = "approved_users.json"
-PENDING_FILE = "pending_applications.json"
-
-def load_json(file):
-    if os.path.exists(file):
-        with open(file, 'r', encoding='utf-8') as f:
+def load_json(filename):
+    if os.path.exists(filename):
+        with open(filename, 'r', encoding='utf-8') as f:
             return json.load(f)
     return {}
 
-def save_json(data, file):
-    with open(file, 'w', encoding='utf-8') as f:
+def save_json(filename, data):
+    with open(filename, 'w', encoding='utf-8') as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
-def get_google_sheet():
-    """Получает данные из публичной Google Таблицы"""
+def get_sheet_data():
+    """Читает публичную Google Таблицу"""
     url = f"https://docs.google.com/spreadsheets/d/{TABLE_ID}/gviz/tq?tqx=out:csv&sheet={SHEET_NAME}"
-    response = requests.get(url)
-    response.encoding = 'utf-8'
-    return list(csv.reader(StringIO(response.text)))
+    r = requests.get(url)
+    r.encoding = 'utf-8'
+    return list(csv.reader(StringIO(r.text)))
+
+def get_cell(row, col_index):
+    """Безопасно получает значение ячейки по индексу"""
+    if col_index < len(row):
+        return row[col_index].strip()
+    return "—"
 
 def find_admin(data, nickname):
-    """Ищет админа по никнейму"""
-    if not data:
-        return None, "❌ Таблица пуста"
+    """Ищет строку админа по никнейму (столбец A)"""
+    if len(data) < 2:
+        return None
     
-    headers = data[0]
-    rows = data[1:] if len(data) > 1 else []
-    
-    nickname_col = None
-    for i, header in enumerate(headers):
-        if header.strip().lower() in ["никнейм администратора", "никнейм", "ник"]:
-            nickname_col = i
-            break
-    
-    if nickname_col is None:
-        return None, "❌ Столбец с никнеймом не найден"
+    rows = data[1:]  # Пропускаем заголовки
     
     for row in rows:
-        if len(row) > nickname_col and row[nickname_col].strip().lower() == nickname.lower():
-            return row, headers
+        if get_cell(row, COL_NICKNAME).lower() == nickname.lower():
+            return row
     
-    return None, f"❌ Админ «{nickname}» не найден"
+    return None
 
-def format_admin_stats(row, headers):
-    """Форматирует статистику одного админа"""
-    data = {}
-    for i, header in enumerate(headers):
-        if i < len(row):
-            data[header.strip().lower()] = row[i]
-        else:
-            data[header.strip().lower()] = ""
-    
-    def get_field(*keys):
-        for key in keys:
-            if key in data:
-                return data[key]
-        return "—"
-    
-    nickname = get_field("никнейм администратора", "никнейм", "ник")
-    position = get_field("должность")
-    extra_position = get_field("доп. должность", "доп должность")
-    warnings = get_field("предупреждений", "предупреждения")
-    reprimands = get_field("выговоров", "выговоры")
-    reputation = get_field("репутация")
-    inactives = get_field("неактивы")
-    days_on_duty = get_field("дни на должности", "дней на должности")
+def format_stats(row):
+    """Форматирует статистику"""
+    return f"""📊 Статистика администратора:
 
-    message = f"""📊 Статистика администратора:
+Никнейм администратора: {get_cell(row, COL_NICKNAME)}
+Должность: {get_cell(row, COL_POSITION)}
+Доп. должность: {get_cell(row, COL_EXTRA_POS)}
+Предупреждений: {get_cell(row, COL_WARNINGS)}
+Выговоров: {get_cell(row, COL_REPRIMANDS)}
+Репутация: {get_cell(row, COL_REPUTATION)}
+Неактивы: {get_cell(row, COL_INACTIVES)}
+Дни на должности: {get_cell(row, COL_DAYS)}"""
 
-Никнейм администратора: {nickname}
-Должность: {position}
-Доп. должность: {extra_position}
-Предупреждений: {warnings}
-Выговоров: {reprimands}
-Репутация: {reputation}
-Неактивы: {inactives}
-Дни на должности: {days_on_duty}"""
-    
-    return message
-
-def send_application_to_chat(user_id, nickname):
-    """Отправляет заявку в беседу"""
-    vk.messages.send(
-        chat_id=CHAT_ID,
-        random_id=get_random_id(),
-        message=f"🔔 Новая заявка на подтверждение!\n\n"
-                f"ID пользователя: {user_id}\n"
-                f"Никнейм: {nickname}\n\n"
-                f"Для подтверждения: /подтвердить {user_id}\n"
-                f"Для отклонения: /отклонить {user_id}"
-    )
-    
-    pending = load_json(PENDING_FILE)
-    pending[str(user_id)] = {
-        "nickname": nickname,
-        "status": "ожидает"
-    }
-    save_json(pending, PENDING_FILE)
-
-def approve_application(user_id, nickname):
-    """Подтверждает заявку"""
-    approved = load_json(USERS_FILE)
-    approved[str(user_id)] = nickname
-    save_json(approved, USERS_FILE)
-    
-    pending = load_json(PENDING_FILE)
-    if str(user_id) in pending:
-        del pending[str(user_id)]
-        save_json(pending, PENDING_FILE)
-    
-    vk.messages.send(
-        user_id=user_id,
-        random_id=get_random_id(),
-        message=f"✅ Ваша заявка подтверждена!\n"
-                f"Ваш никнейм: {nickname}\n"
-                f"Теперь вам доступна команда /stats"
-    )
-
-def reject_application(user_id, nickname):
-    """Отклоняет заявку"""
-    pending = load_json(PENDING_FILE)
-    if str(user_id) in pending:
-        del pending[str(user_id)]
-        save_json(pending, PENDING_FILE)
-    
-    vk.messages.send(
-        user_id=user_id,
-        random_id=get_random_id(),
-        message=f"❌ Ваша заявка отклонена руководством."
-    )
-
-def get_user_nickname(user_id):
-    """Получает никнейм подтверждённого пользователя"""
-    approved = load_json(USERS_FILE)
-    return approved.get(str(user_id))
-
-def get_pending_user(user_id):
-    """Получает данные ожидающей заявки"""
-    pending = load_json(PENDING_FILE)
-    return pending.get(str(user_id))
-
-print("Бот запущен...")
+# ==================== ЗАПУСК ====================
+print("Бот запущен!")
 
 for event in longpoll.listen():
-    if event.type == VkEventType.MESSAGE_NEW and event.to_me and event.text:
-        text = event.text.strip()
-        user_id = event.user_id
-        chat_id = event.chat_id if hasattr(event, 'chat_id') else None
-        
-        states = load_json(STATES_FILE)
-        
-        # ==================== /id ====================
-        if text.lower() == "/id":
+    if event.type != VkEventType.MESSAGE_NEW or not event.to_me or not event.text:
+        continue
+    
+    text = event.text.strip()
+    user_id = event.user_id
+    chat_id = event.chat_id if hasattr(event, 'chat_id') else None
+    is_chat = chat_id is not None
+    
+    # ==================== /id ====================
+    if text.lower() == "/id":
+        vk.messages.send(
+            user_id=user_id,
+            random_id=get_random_id(),
+            message=f"Ваш ID: {user_id}"
+        )
+        continue
+    
+    # ==================== /chatid ====================
+    if text.lower() == "/chatid":
+        if is_chat:
+            vk.messages.send(
+                chat_id=chat_id,
+                random_id=get_random_id(),
+                message=f"ID беседы: {chat_id}"
+            )
+        else:
             vk.messages.send(
                 user_id=user_id,
                 random_id=get_random_id(),
                 message=f"Ваш ID: {user_id}"
             )
-            continue
+        continue
+    
+    # ==================== НАЧАТЬ (ЛС) ====================
+    if text.lower() == "начать" and not is_chat:
+        states = load_json("user_states.json")
+        states[str(user_id)] = "waiting_nickname"
+        save_json("user_states.json", states)
         
-        # ==================== /chatid ====================
-        if text.lower() == "/chatid":
-            if chat_id:
-                reply = f"ID этой беседы: {chat_id}"
-            else:
-                reply = f"Эта команда работает только в беседе. Ваш ID: {user_id}"
+        vk.messages.send(
+            user_id=user_id,
+            random_id=get_random_id(),
+            message="Приветствую, администратор! Для начала работы нужно пройти систему подтверждений.\n\n"
+                    "Напишите свой никнейм и ожидайте, пока заявку одобрит руководство."
+        )
+        continue
+    
+    # ==================== ВВОД НИКНЕЙМА (ЛС) ====================
+    states = load_json("user_states.json")
+    if str(user_id) in states and states[str(user_id)] == "waiting_nickname" and not is_chat:
+        nickname = text
+        
+        pending = load_json("pending.json")
+        pending[str(user_id)] = nickname
+        save_json("pending.json", pending)
+        
+        del states[str(user_id)]
+        save_json("user_states.json", states)
+        
+        vk.messages.send(
+            chat_id=CHAT_ID,
+            random_id=get_random_id(),
+            message=f"🔔 Новая заявка!\n\n"
+                    f"ID: {user_id}\n"
+                    f"Никнейм: {nickname}\n\n"
+                    f"/подтвердить {user_id} — одобрить\n"
+                    f"/отклонить {user_id} — отклонить"
+        )
+        
+        vk.messages.send(
+            user_id=user_id,
+            random_id=get_random_id(),
+            message="✅ Ваша заявка успешно отправлена, ожидайте подтверждения."
+        )
+        continue
+    
+    # ==================== /подтвердить ID ====================
+    if text.lower().startswith("/подтвердить"):
+        parts = text.split()
+        
+        if len(parts) != 2:
             vk.messages.send(
                 user_id=user_id,
                 random_id=get_random_id(),
-                message=reply
+                message="❗ Используйте: /подтвердить ID"
             )
             continue
         
-        # ==================== НАЧАТЬ (только в ЛС) ====================
-        if text.lower() == "начать":
-            states[str(user_id)] = {"state": "waiting_nickname"}
-            save_json(states, STATES_FILE)
-            
+        try:
+            target_id = int(parts[1])
+        except:
             vk.messages.send(
                 user_id=user_id,
                 random_id=get_random_id(),
-                message="Приветствую, администратор! Для начала работы нужно пройти систему подтверждений.\n\n"
-                        "Напишите свой никнейм и ожидайте, пока заявку одобрит руководство."
+                message="❌ Неверный ID"
             )
             continue
         
-        # ==================== ОЖИДАНИЕ НИКНЕЙМА (только в ЛС) ====================
-        if str(user_id) in states and states[str(user_id)].get("state") == "waiting_nickname":
-            nickname = text
-            send_application_to_chat(user_id, nickname)
-            
-            del states[str(user_id)]
-            save_json(states, STATES_FILE)
-            
+        pending = load_json("pending.json")
+        
+        if str(target_id) not in pending:
             vk.messages.send(
                 user_id=user_id,
                 random_id=get_random_id(),
-                message="✅ Ваша заявка успешно отправлена, ожидайте подтверждения."
+                message=f"❌ Заявка с ID {target_id} не найдена"
             )
             continue
         
-        # ==================== /подтвердить ID (в беседе) ====================
-        if text.lower().startswith("/подтвердить"):
-            parts = text.split()
-            if len(parts) == 2:
-                try:
-                    target_id = int(parts[1])
-                    application = get_pending_user(target_id)
-                    
-                    if application:
-                        approve_application(target_id, application["nickname"])
-                        reply = f"✅ Заявка {application['nickname']} (ID: {target_id}) подтверждена!"
-                    else:
-                        reply = f"❌ Заявка с ID {target_id} не найдена."
-                except ValueError:
-                    reply = "❌ Неверный ID. Используйте: /подтвердить 123456789"
-            else:
-                reply = "❗ Используйте: /подтвердить ID"
-            
-            # Отправляем в беседу или в ЛС (в зависимости от того, где команда)
-            if chat_id:
-                vk.messages.send(chat_id=chat_id, random_id=get_random_id(), message=reply)
-            else:
-                vk.messages.send(user_id=user_id, random_id=get_random_id(), message=reply)
+        nickname = pending[str(target_id)]
+        
+        approved = load_json("approved.json")
+        approved[str(target_id)] = nickname
+        save_json("approved.json", approved)
+        
+        del pending[str(target_id)]
+        save_json("pending.json", pending)
+        
+        if is_chat:
+            vk.messages.send(
+                chat_id=chat_id,
+                random_id=get_random_id(),
+                message=f"✅ {nickname} (ID: {target_id}) подтверждён!"
+            )
+        
+        vk.messages.send(
+            user_id=target_id,
+            random_id=get_random_id(),
+            message=f"✅ Ваша заявка подтверждена!\nНикнейм: {nickname}\nТеперь вам доступна команда /stats"
+        )
+        continue
+    
+    # ==================== /отклонить ID ====================
+    if text.lower().startswith("/отклонить"):
+        parts = text.split()
+        
+        if len(parts) != 2:
+            vk.messages.send(
+                user_id=user_id,
+                random_id=get_random_id(),
+                message="❗ Используйте: /отклонить ID"
+            )
             continue
         
-        # ==================== /отклонить ID (в беседе) ====================
-        if text.lower().startswith("/отклонить"):
-            parts = text.split()
-            if len(parts) == 2:
-                try:
-                    target_id = int(parts[1])
-                    application = get_pending_user(target_id)
-                    
-                    if application:
-                        reject_application(target_id, application["nickname"])
-                        reply = f"❌ Заявка {application['nickname']} (ID: {target_id}) отклонена."
-                    else:
-                        reply = f"❌ Заявка с ID {target_id} не найдена."
-                except ValueError:
-                    reply = "❌ Неверный ID. Используйте: /отклонить 123456789"
-            else:
-                reply = "❗ Используйте: /отклонить ID"
-            
-            if chat_id:
-                vk.messages.send(chat_id=chat_id, random_id=get_random_id(), message=reply)
-            else:
-                vk.messages.send(user_id=user_id, random_id=get_random_id(), message=reply)
+        try:
+            target_id = int(parts[1])
+        except:
+            vk.messages.send(
+                user_id=user_id,
+                random_id=get_random_id(),
+                message="❌ Неверный ID"
+            )
             continue
         
-        # ==================== /stats (только в ЛС) ====================
-        if text.lower() == "/stats":
-            nickname = get_user_nickname(user_id)
-            
-            if not nickname:
-                vk.messages.send(
-                    user_id=user_id,
-                    random_id=get_random_id(),
-                    message="❌ У вас нет доступа. Сначала пройдите подтверждение — напишите «Начать»."
-                )
-                continue
-            
-            try:
-                data = get_google_sheet()
-                row, headers = find_admin(data, nickname)
-                
-                if row is None:
-                    reply = headers if headers else "❌ Неизвестная ошибка"
-                else:
-                    reply = format_admin_stats(row, headers)
-                    
-            except Exception as e:
-                reply = f"❌ Ошибка: {e}"
-
-            vk.messages.send(user_id=user_id, random_id=get_random_id(), message=reply)
+        pending = load_json("pending.json")
+        
+        if str(target_id) not in pending:
+            vk.messages.send(
+                user_id=user_id,
+                random_id=get_random_id(),
+                message=f"❌ Заявка с ID {target_id} не найдена"
+            )
             continue
+        
+        nickname = pending[str(target_id)]
+        del pending[str(target_id)]
+        save_json("pending.json", pending)
+        
+        if is_chat:
+            vk.messages.send(
+                chat_id=chat_id,
+                random_id=get_random_id(),
+                message=f"❌ {nickname} (ID: {target_id}) отклонён"
+            )
+        
+        vk.messages.send(
+            user_id=target_id,
+            random_id=get_random_id(),
+            message="❌ Ваша заявка отклонена руководством."
+        )
+        continue
+    
+    # ==================== /stats (ЛС) ====================
+    if text.lower() == "/stats" and not is_chat:
+        approved = load_json("approved.json")
+        
+        if str(user_id) not in approved:
+            vk.messages.send(
+                user_id=user_id,
+                random_id=get_random_id(),
+                message="❌ У вас нет доступа. Напишите «Начать» для регистрации."
+            )
+            continue
+        
+        nickname = approved[str(user_id)]
+        
+        try:
+            data = get_sheet_data()
+            row = find_admin(data, nickname)
+            
+            if row:
+                reply = format_stats(row)
+            else:
+                reply = f"❌ Никнейм «{nickname}» не найден в таблице"
+        except Exception as e:
+            reply = f"❌ Ошибка: {e}"
+        
+        vk.messages.send(
+            user_id=user_id,
+            random_id=get_random_id(),
+            message=reply
+        )
+        continue
